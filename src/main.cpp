@@ -4,8 +4,10 @@
 #include <vector>
 #include <string_view>
 #include <unordered_set>
+#include <unordered_map>
 #include <cstring>
 #include <optional>
+#include <memory>
 
 const char * TEXT =
 "var a: sint64 = 42 yes"
@@ -334,8 +336,291 @@ namespace tokenizer {
 
 
 
+void doIndent(std::ostream& os, size_t indent) {
+    while (indent--)
+        os<<"  ";
+}
+
+
+
 namespace ast {
     
+    struct Error {
+        tokenizer::Token token;
+        std::string message;
+
+        Error(tokenizer::Token tok, std::string msg)
+            : token(std::move(tok)), message(std::move(msg))
+        {}
+
+        void print(std::ostream& os, size_t indent = 0) const {
+            doIndent(os, indent);
+            os
+                <<token.line
+                <<":"
+                <<token.col
+                <<": "
+                <<message
+                <<": "
+                <<token.value
+                <<"\n";
+        }
+    };
+
+
+
+    //huge hierarchy
+
+    class Node {
+        public:
+
+            virtual ~Node() = default;
+
+            virtual void print(std::ostream& os, size_t indent = 0) const {
+                doIndent(os, indent);
+                os<<"Node\n";
+            }
+    };
+
+    class TypeNode : public Node {
+
+    };
+
+    class NewNameNode : public Node {
+        
+    };
+
+    class Expr : public Node {
+
+    };
+
+    class InvalidExpr : public Expr {
+
+    };
+
+    class KeywordExpr : public Expr {
+
+    };
+
+    class VoidExpr : public Expr {
+
+    };
+
+    class IdentifierExpr : public Expr {
+
+    };
+
+    class NumberExpr : public Expr {
+        public:
+            tokenizer::Token token;
+            NumberExpr(tokenizer::Token tok)
+                : token(tok)
+            {}
+    };
+
+    class Program : public Node {
+        public:
+            std::vector<std::unique_ptr<Expr>> content;
+
+            void print(std::ostream& os, size_t indent = 0) const override {
+                doIndent(os, indent);
+
+                os<<"Program:\n";
+                
+                for (const auto& node : content)
+                    node->print(os, indent+1);
+            }
+    };
+
+
+
+    class Parser;
+    class Keyword {
+        public:
+
+            virtual ~Keyword() = default;
+
+            virtual std::unique_ptr<KeywordExpr> parse(Parser&) = 0;
+    };
+
+    class Language {
+        public:
+
+            std::unordered_map<std::string_view,
+                std::unique_ptr<Keyword>> exprKeywords;
+
+            std::unordered_map<std::string_view,
+                std::unique_ptr<Keyword>> typeKeywords;
+    };
+
+    class Parser {
+        private:
+            Language& lang;
+            tokenizer::TokenStream stream;
+
+        public:
+            std::vector<Error> errors;
+
+            Parser(Language& l, tokenizer::TokenStream s)
+                : lang(l), stream(std::move(s))
+            {}
+
+
+
+            void addError(const tokenizer::Token& tok, std::string message) {
+                errors.emplace_back(tok, std::move(message));
+            }
+
+            void addError(Error e) {
+                errors.emplace_back(e);
+            }
+
+            void printErrors(std::ostream& os, size_t indent = 0) const {
+                doIndent(os, indent);
+                os<<"program errors:\n";
+
+                if (errors.empty()) {
+                    doIndent(os, indent+1);
+                    os<<"none!\n";
+                } else for (const Error& e : errors)
+                    e.print(os, indent+1);
+            }
+
+
+
+            typedef tokenizer::TokenKind Kind;
+
+            void parseExpect(std::string_view str) {
+                auto t = stream.peek();
+
+                if (t.kind == Kind::identifier)
+                    addError(t, "unexpected identifier");
+                else if (t.value != str)
+                    addError(t, "idk, expected something else");
+                else
+                    stream.eat();
+            }
+
+            bool parseIfEq(std::string_view str) {
+                auto t = stream.peek();
+
+                if (t.kind == Kind::identifier)
+                    return false;
+                if (t.value == str) {
+                    stream.eat();
+                    return true;
+                }
+                return false;
+            }
+
+            std::unique_ptr<NewNameNode> parseNewName() {
+                auto result = std::make_unique<NewNameNode>();
+
+                //TODO: namespace stuff and templates (name::[template])
+                auto name = stream.peek();
+
+                if (name.kind == Kind::identifier) {
+                    stream.eat();
+                } else
+                    addError(name, "expected identifier, got");
+
+                return result;
+            }
+
+            std::unique_ptr<TypeNode> parseType() {
+                auto result = std::make_unique<TypeNode>();
+
+
+                //TEMP
+                stream.eat();
+
+
+                return result;
+            }
+
+            std::unique_ptr<Expr> parseExpr(int prio = 0) {
+                std::unique_ptr<Expr> result;
+
+                auto first = stream.peek();
+
+                switch (first.kind) {
+                    case Kind::keyword:
+                        {
+                            stream.eat();
+                            auto iter = lang.exprKeywords.find(first.value);
+
+                            if (iter == lang.exprKeywords.end())
+                                result = std::make_unique <InvalidExpr>();
+                            else
+                                result = iter->second->parse(*this);
+                        }
+                        break;
+                    case Kind::symbol:
+                        if (first.value == "(")
+                        {
+                            stream.eat();
+
+                            auto c = stream.peek();
+
+                            if (c.kind == Kind::symbol && c.value == ")") {
+                                stream.eat();
+                                result = std::make_unique<VoidExpr>();
+                            } else {
+                                result = parseExpr();
+                                parseExpect(")");
+                            }
+                        }
+                        else if (first.value == "{")
+                        {
+
+                        }
+                        else
+                        {
+
+                        }
+                        break;
+                    case Kind::number:
+                        {
+                            stream.eat();
+                            result = std::make_unique<NumberExpr>(first);
+                        }
+                        break;
+                    case Kind::identifier:
+                        {
+                            //TODO: use parseName<"Expr">();
+                            //TEMP:
+                            stream.eat();
+                            result = std::make_unique<IdentifierExpr>();
+                        }
+                        break;
+                    default:
+                        {
+                            stream.eat();
+                            result = std::make_unique<InvalidExpr>();
+                        }
+                        break;
+                }
+
+
+                //TODO: operators and such here
+                
+
+                return result;
+            }
+
+            Program parseProgram() {
+                Program result;
+
+                while (stream.peek().kind != Kind::eof) {
+                    result.content.push_back(
+                            parseExpr()
+                            );
+                }
+
+                return result;
+            }
+    };
+
 };
 
 
@@ -348,6 +633,62 @@ int main(int argv, char ** argc) {
     double a;
     tokenizer::parseNum("0XF.8", a);
     std::cout<<'\n'<<a<<'\n';
+
+
+
+    ast::Language lang;
+
+    class VarExpr : public ast::KeywordExpr {
+        public:
+            std::unique_ptr<ast::NewNameNode> name;
+            std::unique_ptr<ast::TypeNode> type = nullptr;
+            std::unique_ptr<ast::Expr> initializer;
+
+            void print(std::ostream& os, size_t indent = 0) const override {
+                doIndent(os, indent); os<<"var:\n";
+                doIndent(os, indent+1); os<<"name: "; name->print(os);
+
+                if(type != nullptr) {
+                    doIndent(os, indent+1); os<<"type:\n";
+                    type->print(os, indent+2);
+                }
+
+                doIndent(os, indent+1); os<<"initializer:\n";
+                initializer->print(os, indent+2);
+            }
+    };
+
+    class VarKwd : public ast::Keyword {
+        public:
+            std::unique_ptr<ast::KeywordExpr> parse(ast::Parser& parser) override {
+                auto result = std::make_unique<VarExpr>();
+
+                auto name = parser.parseNewName();
+                result->name = std::move(name);
+
+                if (parser.parseIfEq(":"))
+                    result->type = parser.parseType();
+
+                parser.parseExpect("=");
+
+                result->initializer = parser.parseExpr();
+
+                return result;
+            }
+    };
+
+    lang.exprKeywords.emplace("var",
+            std::make_unique<VarKwd>()
+            );
+
+    ast::Parser parser(lang, std::move(tokens));
+
+    auto program = parser.parseProgram();
+
+    program.print(std::cout);
+    parser.printErrors(std::cout);
+
+
 
     {
         char tmp;
