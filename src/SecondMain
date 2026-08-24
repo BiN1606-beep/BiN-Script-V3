@@ -1,0 +1,780 @@
+#define WAIT_FOR_EXIT 0
+
+#include <iostream>
+#include <cstdint>
+#include <cctype>
+#include <vector>
+#include <string_view>
+#include <unordered_set>
+#include <unordered_map>
+#include <cstring>
+#include <optional>
+#include <memory>
+
+const char * TEXT =
+"var a: sint64 = {one; two; 42};\n"
+"(yes);\n"
+".thing = 42;\n"
+;
+
+
+
+namespace tokenizer {
+
+    enum class TokenKind {
+        eof,
+        identifier,
+        number,
+        symbol,
+        keyword
+    };
+
+    struct Token {
+        TokenKind kind;
+        std::string_view value;
+        size_t line = 0;
+
+        size_t col = 0;
+    };
+
+    struct TokenStream {
+        std::vector<Token> buff;
+        std::string_view source;
+        size_t index = 0;
+
+        TokenStream(std::string_view src, std::vector<Token> tokens)
+            : source(src), buff(std::move(tokens))
+        {}
+
+        Token peek() {
+            if (index >= buff.size())
+                return {
+                    .kind = TokenKind::eof,
+                    .value = "<eof>",
+                };
+
+            return buff[index];
+        }
+
+        Token eat() {
+           if (index >= buff.size())
+                return {
+                    .kind = TokenKind::eof,
+                    .value = "<eof>",
+                };
+
+            return buff[index++];
+
+        }
+
+        typedef size_t Checkpoint;
+
+        Checkpoint newCheckpoint() { return index; }
+
+        void gotoCheckpoint(Checkpoint k) { index = k; }
+
+        void reset() { index = 0; }
+    };
+
+
+
+    constexpr std::string_view compounds[] = {
+        "==",
+        "!=",
+        ">=",
+        "<=",
+        "=>",
+        "<-",
+        "->",
+        "::",
+        "..",
+
+        "...",
+        "===",
+        "<=>",
+        "<->",
+    };
+
+    static const std::unordered_set<std::string_view> keywords = {
+        "var",
+    };
+
+    constexpr bool isNum(const char c) { return '0' <= c && c <= '9'; }
+
+    constexpr bool isIdent(const char c) {
+        return
+            (c=='_')
+            ||('a'<=c && c<='z')
+            ||('A'<=c && c<='Z')
+            ||('0'<=c && c<='9')
+            ;
+    }
+
+    bool isWS(const char c) { return std::isspace(static_cast<unsigned char>(c)); }
+
+    bool isCompound(std::string_view s) {
+        for (auto c : compounds)
+            if (c==s) return true;
+        return false;
+    }
+
+    constexpr bool isNumChar(const char c) {
+        //TEMP
+        return isIdent(c) || c=='.';
+    }
+
+
+
+    TokenStream tokenize(const char * str) {
+        std::vector<Token> r;
+
+        size_t index = 0;
+
+        size_t line = 0;
+        size_t col = 0;
+
+        auto peek = [&]()->char { return str[index]; };
+
+        auto eat = [&]()->char {
+            col++;
+            return str[index++];
+        };
+
+        auto eats = [&](size_t n) {
+            for (size_t i = 0; i < n; i++)
+                eat();
+        };
+
+        auto skipWS = [&]()->bool {
+            char c = peek();
+
+            while(isWS(c)) {
+                eat();
+                if (c=='\n') {
+                    line++;
+                    col = 1;
+                }
+                c = peek();
+            }
+
+            return peek() != '\0';
+        };
+
+        auto push = [&](TokenKind kind, std::string_view value) {
+            r.push_back({
+                    .kind = kind,
+                    .value = value,
+                    .line = line,
+                    .col = col
+            });
+        };
+
+        while (skipWS()) {
+            char c = peek();
+
+            //preparser instructions
+            if (c=='#')
+            {
+                //TEMP
+                eat();
+            }
+            //quoted identifiers
+            else if (c=='"')
+            {
+                eat();
+                size_t start = index;
+                size_t i = start;
+                size_t lines = 0;
+
+                for (char c = str[i]; c!='"'; c = str[++i])
+                    if (c=='\n') lines++;
+                    else if (c=='\\') i++;
+
+                push(
+                    TokenKind::identifier,
+                    std::string_view(str+start, i-start)
+                );
+
+                line += lines;
+                eats(i-start+1);
+            }
+            //quoted identifiers
+            else if (c=='\'')
+            {
+                eat();
+                size_t start = index;
+                size_t i = start;
+                size_t lines = 0;
+
+                for (char c = str[i]; c!='\''; c = str[++i])
+                    if (c=='\n') lines++;
+                    else if (c=='\\') i++;
+
+                push(
+                    TokenKind::identifier,
+                    std::string_view(str+start, i-start)
+                );
+
+                line += lines;
+                eats(i-start+1);
+            }
+            //numbers
+            else if (isNum(c))
+            {
+                size_t start = index;
+                size_t i = start;
+
+                while (isNumChar(str[i])) i++;
+
+                auto value = std::string_view(str+start, i-start);
+
+                push(TokenKind::number, value);
+
+                eats(i-start); //nom nom
+            }
+            //keywords or identifiers
+            else if (isIdent(c))
+            {
+                size_t start = index;
+                size_t i = start;
+
+                while (isIdent(str[i])) i++;
+
+                auto value = std::string_view(str+start, i-start);
+
+                if (keywords.find(value)!= keywords.end())
+                    push(TokenKind::keyword, value);
+                else
+                    push(TokenKind::identifier, value);
+
+                eats(i-start); //nom nom
+            }
+            //symbols
+            else
+            {
+                auto three = std::string_view(str+index, 3);
+                auto two = std::string_view(str+index, 2);
+                auto one = std::string_view(str+index, 1);
+
+                if (isCompound(three)) {
+                    push(TokenKind::symbol, three);
+                    eats(3);
+                } else if (isCompound(two)) {
+                    push(TokenKind::symbol, two);
+                    eats(2);
+                } else {
+                    push(TokenKind::symbol, one);
+                    eat();
+                }
+            }
+        }
+
+        return TokenStream(str, std::move(r));
+    }
+
+
+
+    //maybe support exponential notation with "p"
+    constexpr int digitValue(char c) {
+
+        if (isNum(c))
+            return c - '0';
+
+        if ('a'<=c && c<='f')
+            return 10 + (c - 'a');
+
+        if ('A'<=c && c<='F')
+            return 10 + (c - 'A');
+
+        return -1;
+    }
+
+    template<typename T> bool parseNum(std::string_view text, T& result) {
+
+        uint8_t base = 10;
+        size_t i = 0;
+
+        if (text.size()>2 && text[0]=='0') switch (std::tolower(static_cast<unsigned char>(text[1]))) {
+            case 'x': base =16; i = 2; break;
+            case 'o': base = 8; i = 2; break;
+            case 'q': base = 4; i = 2; break;
+            case 'b': base = 2; i = 2; break;
+        }
+
+        T value = 0;
+        T fraction = 0;
+        T divisor = 1;
+
+        bool dot = false;
+
+        for (; i<text.size(); i++) {
+            char c = text[i];
+
+            if (c=='_') continue;
+
+            if (c=='.') {
+                if (dot) return false;
+
+                dot = true;
+                continue;
+            }
+
+            int digit = digitValue(c);
+
+            if (digit<0 || digit>=base)
+                return false;
+
+            if (dot) {
+                divisor *= base;
+                fraction += static_cast<T>(digit) / divisor;
+            } else
+                value = value * base + digit;
+        }
+
+        result = value + fraction;
+        return true;
+
+    }
+
+};
+
+
+
+void doIndent(std::ostream& os, size_t indent) {
+    while (indent--)
+        os<<" ";
+}
+
+
+
+namespace ast {
+
+    struct Error {
+        tokenizer::Token token;
+        std::string message;
+
+        Error(tokenizer::Token tok, std::string msg)
+            : token(std::move(tok)), message(std::move(msg))
+        {}
+
+        void print(std::ostream& os, size_t indent = 0) const {
+            doIndent(os, indent);
+            os
+                <<token.line
+                <<":"
+                <<token.col
+                <<": "
+                <<message
+                <<": "
+                <<token.value
+                <<"\n";
+        }
+    };
+
+
+
+    //huge hierarchy
+
+    class Parser;
+
+    class Node {
+        public:
+
+            virtual ~Node() = default;
+
+            virtual void print(std::ostream& os, size_t indent = 0) const {
+                doIndent(os, indent);
+                os<<"Node\n";
+            }
+    };
+
+    class TypeNode : public Node {
+
+    };
+
+    class NewNameNode : public Node {
+
+    };
+
+    class Expr : public Node {
+
+    };
+
+    class InvalidExpr : public Expr {
+        /*public:
+        InvalidExpr(Parser const * p) {
+            p->addError()
+        }*/
+    };
+
+    class KeywordExpr : public Expr {
+
+    };
+
+    class VoidExpr : public Expr {
+
+    };
+
+    class IdentifierExpr : public Expr {
+
+    };
+
+    class NumberExpr : public Expr {
+        public:
+            tokenizer::Token token;
+            NumberExpr(tokenizer::Token tok)
+                : token(tok)
+            {}
+    };
+
+    class BlockExpr : public Expr {
+        public:
+        std::vector<std::unique_ptr<Expr>> content;
+        std::unique_ptr<Expr> last;
+
+        void print(std::ostream& os, size_t indent = 0) const override {
+
+            doIndent(os, indent);
+            os<<"Block:\n";
+
+            for (const auto& node : content)
+                node->print(os, indent+1);
+
+            if (this->last) {
+                doIndent(os, indent);
+                os<<"Last:\n";
+                this->last->print(os, indent+1);
+            }
+        }
+    };
+
+    class PrefixOperatorExpr : public Expr {
+        public:
+        std::unique_ptr<Expr> expr;
+
+        void print(std::ostream& os, size_t indent = 0) const override {
+            doIndent(os, indent);
+
+            os<<"prefix operator:\n";
+
+            expr->print(os, indent+1);
+        }
+    };
+
+    class SuffixOperatorExpr : public Expr {
+        public:
+        std::unique_ptr<Expr> expr;
+
+        void print(std::ostream& os, size_t indent = 0) const override {
+            doIndent(os, indent);
+
+            os<<"suffix operator:\n";
+
+            expr->print(os, indent+1);
+        }
+    };
+
+
+    class BinaryOperatorExpr : public Expr {
+        public:
+        std::unique_ptr<Expr> first;
+        std::unique_ptr<Expr> second;
+
+        void print(std::ostream& os, size_t indent = 0) const override {
+            doIndent(os, indent);
+
+            os<<"binary operator:\n";
+
+            first->print(os, indent+1);
+            second->print(os, indent+1);
+        }
+    };
+    
+    class DotInitExpr : public Expr {
+        public:
+        std::string_view name;
+        std::unique_ptr<Expr> initializer;
+        
+        void print(std::ostream& os, size_t indent = 0) const override {
+            doIndent(os, indent);
+            
+            os<<"dot initializer:\n";
+            doIndent(os, indent+1);
+            os<<"name: "<<name<<"\n";
+            doIndent(os, indent+1);
+            os<<"initializer:\n";
+            initializer->print(os, indent+2);
+        }
+    };
+
+    class Program : public Node {
+        public:
+            std::vector<std::unique_ptr<Expr>> content;
+
+            void print(std::ostream& os, size_t indent = 0) const override {
+                doIndent(os, indent);
+
+                os<<"Program:\n";
+
+                for (const auto& node : content)
+                    node->print(os, indent+1);
+            }
+    };
+
+
+
+    class Keyword {
+        public:
+
+            virtual ~Keyword() = default;
+
+            virtual std::unique_ptr<KeywordExpr> parse(Parser&) = 0;
+    };
+
+    class PrefixOperator {
+        public:
+        virtual ~PrefixOperator() = default;
+        
+        std::string symbol;
+    };
+
+    class SuffixOperator {
+        public:
+        virtual ~SuffixOperator() = default;
+        
+        std::string symbol;
+    };
+
+    class BinaryOperator {
+        public:
+        virtual ~BinaryOperator() = default;
+        
+        std::string symbol;
+        size_t priority = 100;
+    };
+
+    class Language {
+        public:
+
+            std::unordered_map<
+                std::string_view,
+                std::unique_ptr<Keyword>
+            > exprKeywords;
+
+            std::unordered_map<
+                std::string_view,
+                std::unique_ptr<Keyword>
+            > typeKeywords;
+
+            std::unordered_map<
+                std::string_view,
+                std::unique_ptr<PrefixOperator>
+            > prefixOperators;
+
+            std::unordered_map<
+                std::string_view,
+                std::unique_ptr<SuffixOperator>
+            > SuffixOperators;
+
+            std::unordered_map<
+                std::string_view,
+                std::unique_ptr<BinaryOperator>
+            > BinaryOperators;
+    };
+
+    class Parser {
+        private:
+            Language& lang;
+            tokenizer::TokenStream stream;
+
+        public:
+            std::vector<Error> errors;
+
+            Parser(Language& l, tokenizer::TokenStream s)
+                : lang(l), stream(std::move(s))
+            {}
+
+
+
+            void addError(const tokenizer::Token& tok, std::string message) {
+                errors.emplace_back(tok, std::move(message));
+            }
+
+            void addError(Error e) {
+                errors.emplace_back(e);
+            }
+
+            void printErrors(std::ostream& os, size_t indent = 0) const {
+                doIndent(os, indent);
+                os<<"program errors:\n";
+
+                if (errors.empty()) {
+                    doIndent(os, indent+1);
+                    os<<"none!\n";
+                } else for (const Error& e : errors)
+                    e.print(os, indent+1);
+            }
+
+
+
+            typedef tokenizer::TokenKind Kind;
+
+            void parseExpect(std::string_view str) {
+                auto t = stream.peek();
+
+                if (t.kind == Kind::identifier)
+                    addError(t, "unexpected identifier");
+                else if (t.value != str)
+                    addError(t, "idk, expected something else");
+                else
+                    stream.eat();
+            }
+
+            bool parseIfEq(std::string_view str) {
+                auto t = stream.peek();
+
+                if (t.kind == Kind::identifier)
+                    return false;
+                if (t.value == str) {
+                    stream.eat();
+                    return true;
+                }
+                return false;
+            }
+
+            std::unique_ptr<NewNameNode> parseNewName() {
+                auto result = std::make_unique<NewNameNode>();
+
+                //TODO: namespace stuff and templates (name::[template])
+                auto name = stream.peek();
+
+                if (name.kind == Kind::identifier) {
+                    stream.eat();
+                } else
+                    addError(name, "expected identifier, got");
+
+                return result;
+            }
+
+            std::unique_ptr<TypeNode> parseType() {
+                auto result = std::make_unique<TypeNode>();
+
+
+                //TEMP
+                stream.eat();
+
+
+                return result;
+            }
+
+            std::unique_ptr<Expr> parseExpr(int prio = 0) {
+                std::unique_ptr<Expr> result;
+
+                auto first = stream.peek();
+
+                switch (first.kind) {
+                    case Kind::keyword:
+                        {
+                            stream.eat();
+                            auto iter = lang.exprKeywords.find(first.value);
+
+                            if (iter == lang.exprKeywords.end())
+                                result = std::make_unique <InvalidExpr>();
+                            else
+                                result = iter->second->parse(*this);
+                        }
+                        break;
+                    case Kind::symbol:
+                        if (first.value == "(")
+                        {
+                            stream.eat();
+
+                            auto c = stream.peek();
+
+                            if (c.kind == Kind::symbol && c.value == ")") {
+                                stream.eat();
+                                result = std::make_unique<VoidExpr>();
+                            } else {
+                                result = parseExpr();
+                                parseExpect(")");
+                            }
+                        }
+                        else if (first.value == "{")
+                        {
+                            stream.eat();
+
+                            auto r = std::make_unique<BlockExpr>();
+
+                            while (true) {
+                                auto current = parseExpr();
+
+                                if (parseIfEq(";")) {
+                                    r->content.emplace_back(std::move(current));
+                                    current = nullptr;
+                                }
+
+                                if (parseIfEq("}")) {
+                                    r->last = std::move(current);
+                                    break;
+                                }
+                            }
+
+                            result = std::move(r);
+
+                        }
+                        else if (first.value == ".")
+                        {
+                            stream.eat();
+                            
+                            auto name = stream.peek();
+                            
+                            if (name.kind != Kind::identifier) {
+                                addError(name, "expected identifier");
+                                result = std::make_unique<InvalidExpr>();
+                            } else {
+                                stream.eat();
+                                auto r = std::make_unique<DotInitExpr>();
+                                r->name = name.value;
+                                parseExpect("=");
+                                r->initializer = parseExpr();
+                                result = std::move(r);
+                            }
+                        }
+                        else
+                        {
+                            /*
+                            stream.eat();
+                            auto iter = lang.prefixOperators.find(first.value);
+
+                            if (iter == lang.prefixOperators.end()) {
+                                result = std::make_unique <InvalidExpr>();
+                                addError(first, "unexpected token");
+                            }
+                            else
+                                result = iter->second->parse(*this);
+                            */
+                            stream.eat();
+                            if (lang.prefixOperatorSet.find(first.value)==lang.prefixOperatorSet.end()) {
+                                
+                            }
+                        }
+                        break;
+                    case Kind::number:
+                        {
+                            stream.eat();
+                            result = std::make_unique<NumberExpr>(first);
+                        }
+                        break;
+                    case Kind::identifier:
+                        {
+                            //TODO: use parseName<"Expr">();
+                            //TEMP:
+                            stream.eat();
+                            result = std::make_unique<IdentifierExpr>();
+                        }
+                        break;
+                    default:
+                        {
+                            stream.eat();
+                            result = std::make_unique<InvalidExpr>();
+                 
